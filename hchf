@@ -1,0 +1,168 @@
+library(topicmodels)
+library(devtools)
+library(quanteda)
+library(stm)
+
+library('e1071')
+library('tm')
+
+library(geometry)
+library(Rtsne)
+library(foreach)
+
+############
+###Prep####
+##########
+
+set.seed(1)
+stm.dat <- read.csv("NaiveBayes.csv")
+meta.list <- list(document = stm.dat$document,
+                  day = stm.dat$day,
+                  presenter = stm.dat$presenter)
+stm.corpus <- corpus(as.character(stm.dat$document),
+                     metacorpus = meta.list)
+stm.dfm <- dfm(stm.corpus) 
+stm.dfm.stop <- dfm(stm.corpus,
+                    remove = c(stopwords("english"), "go", "can", "get"),
+                    stem = FALSE,
+                    remove_punct = TRUE)
+
+stm.dfm.trimmed <- dfm_trim(stm.dfm,
+                            min_count = 50,
+                            max_count = .8)
+
+lda.out <- LDA(stm.dfm.trimmed, 4, method = "VEM")
+lda.whole <- LDA(stm.dfm, 4, method = "VEM")
+
+most.likely.topics <- topics(lda.out)
+hist(most.likely.topics, breaks = 4, main = "Most Likely Topics")
+terms(lda.out, 15)
+
+
+##############################################
+###Metadata - Commission Presenters & Days###
+############################################
+
+topic.props <- lda.out@gamma
+topic.prop <- lda.out@gamma[,3]
+presenter <- stm.corpus$metadata$presenter
+reg.out <- lm(topic.prop ~ presenter)
+
+
+######################
+###STM w/ Metadata###
+####################
+
+meta.dat <- data.frame(day = stm.corpus$metadata$day,
+                       document = stm.corpus$metadata$document,
+                       presenter = stm.corpus$metadata$presenter)
+
+
+stm.out <- stm(documents = stm.dfm.trimmed,
+               K = 0,
+               prevalence =~ presenter + s(day),
+               max.em.its = 200,
+               data = meta.dat,
+               init.type = "Spectral")
+
+####################
+###Visualization###
+##################
+
+labelTopics(stm.out, c(33, 48, 25))
+thoughts3 <- findThoughts(stm.out,
+                          texts = stm.corpus$documents$texts,
+                          n = 1,
+                          topics = 4)$docs[[1]]
+plotQuote(thoughts3)
+plotQuote(thoughts3, width = 60, text.cex = .5)
+
+plot(stm.out, type = "summary", xlim = c(0, .3))
+
+#######################
+###Effect Estimates###
+#####################
+
+effect.estimates <- estimateEffect(1:49 ~ presenter + s(day),
+                                   stm.out,
+                                   meta = meta.dat,
+                                   uncertainty = "Global")
+
+plot(effect.estimates,
+     covariate = "presenter",
+     topics = c(33, 48, 25),
+     method = "difference",
+     model = stm.out,
+     cov.value1 = "HospitalRepresentative",
+     cov.value2 = "AHCA",
+     xlim = c(-.2, .2))
+
+plot(effect.estimates, "day", method = "continuous", topics = 7,
+     model = stm.out, printlegend = FALSE, xaxt = "n", xlab = "May 2015 - Feb 2016")
+
+
+#########################
+###Content Covariates###
+#######################
+
+stm.content <- stm(stm.dfm, K = 20,
+                   prevalence =~ presenter + s(day),
+                   content =~ presenter,
+                   max.em.its = 75,
+                   data = meta.dat,
+                   init.type = "Spectral")
+
+plot(stm.content, type = "perspectives", topics = 11)
+
+#########################
+######Naive Bayes#######
+#######################
+
+hchf.transcripts <- read.csv("HCHF.csv")
+labels <- hchf.transcripts$MTG_PRESENTER
+code.numbers <- hchf.transcripts$CODE_NUMBER
+hchf.transcripts$MTG_PRESENTER <- NULL
+hchf.transcripts$CODE_NUMBER <- NULL
+
+training.dtm <- hchf.transcripts[labels == "AHCA" | labels == "HOSPITAL" |
+                                   labels == "INDUSTRYADV" | labels == "WATCHDOG",]
+training.labels <- labels[labels == "AHCA" | labels == "HOSPITAL" |
+                            labels == "INDUSTRYADV" | labels == "WATCHDOG"]
+nb.mod <- naiveBayes(training.labels~.,
+                     data = training.dtm)
+
+test.dtm <- hchf.transcripts[labels == "UNKNOWN",]
+test.code.numbers <- code.numbers[labels == "UNKNOWN"]
+
+pred <- predict(nb.mod, test.dtm)
+number.and.predictions <- data.frame(number = test.code.numbers,
+                                     prediction = pred)
+
+print(number.and.predictions)
+
+svm.mod <- svm(training.labels~.,
+               data = training.dtm,
+               kernel = "linear")
+
+test.dtm <- hchf.transcripts[labels == "UNKNOWN",]
+test.code.numbers <- code.numbers[labels == "UNKNOWN"]
+
+pred.svm <- predict(svm.mod, test.dtm)
+numbers.and.predictions <- data.frame(number = test.code.numbers,
+                                      prediction = pred.svm)
+
+print(numbers.and.predictions)
+
+#########################
+######Dendrogram#######
+#######################
+
+
+cloud <- dfm(corpus_subset(stm.corpus),
+             remove = c(stopwords("english"), "go", "can", "get"),
+             stem = FALSE, remove_punct = TRUE)
+set.seed(02138)
+set.seed(02139)
+textplot_wordcloud(cloud, min.freq = 6, random.order = FALSE,
+                   rot.per = .25,
+                   colors = RColorBrewer::brewer.pal(8,"Dark2"))
